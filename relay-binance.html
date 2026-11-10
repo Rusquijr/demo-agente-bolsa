@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Relé Binance · tradeagent</title>
+<style>
+  body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 16px; color: #13212a; background: #f5f7f6; }
+  header { margin-bottom: 10px; }
+  small { color: #5a6b72; }
+  pre { font: 11px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; background: #fff;
+        border: 1px solid #d2dbd9; border-radius: 6px; padding: 8px; max-height: 60vh; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Relé Binance para el Simulador tradeagent</strong> · <span id="h">arrancando…</span><br>
+  <small>Solo lee datos públicos de Binance USDⓈ-M (sin claves ni cuenta). La demo de Claude lee esta página desde el navegador de la app; puedes cerrarla cuando quieras.</small>
+</header>
+<main><pre id="state">{}</pre></main>
+<script>
+"use strict";
+(() => {
+  const SYMS = ["BTCUSDT", "ETHUSDT", "HYPEUSDT", "UNIUSDT", "PUMPUSDT", "AAVEUSDT"];
+  const B = "https://fapi.binance.com", CANDLE = 300000;
+  const st = { v: 1, relay: "tradeagent-binance", started: Date.now(), updated: 0, errors: 0, lastError: "", symbols: {} };
+  for (const s of SYMS) st.symbols[s] = { bid: 0, ask: 0, bookTs: 0, imb: 0, depthTs: 0, funding: 0, fundingTs: 0, k: [] };
+
+  async function get(path) {
+    const r = await fetch(B + path, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status} en ${path.split("?")[0]}`);
+    return r.json();
+  }
+  // Velas de 5 min: solo cerradas (closeTime < ahora). Cada vela: [apertura, cierre, volumen, compra agresora].
+  async function klines() {
+    const now = Date.now();
+    for (const s of SYMS) {
+      const x = st.symbols[s], last = x.k.length ? x.k[x.k.length - 1][0] : 0;
+      const need = last ? Math.min(300, Math.max(2, Math.ceil((now - last) / CANDLE) + 1)) : 300;
+      const rows = await get(`/fapi/v1/klines?symbol=${s}&interval=5m&limit=${need}`);
+      for (const r of rows) {
+        const open = +r[0];
+        if (+r[6] < now && open > (x.k.length ? x.k[x.k.length - 1][0] : 0)) x.k.push([open, +r[4], +r[5], +r[9]]);
+      }
+      if (x.k.length > 300) x.k.splice(0, x.k.length - 300);
+    }
+  }
+  async function book() {
+    const rows = await Promise.all(SYMS.map(s => get(`/fapi/v1/ticker/bookTicker?symbol=${s}`)));
+    for (const r of rows) { const x = st.symbols[r.symbol]; x.bid = +r.bidPrice; x.ask = +r.askPrice; x.bookTs = Date.now(); }
+  }
+  async function depth() {
+    for (const s of SYMS) {
+      const d = await get(`/fapi/v1/depth?symbol=${s}&limit=10`);
+      const b = d.bids.reduce((t, l) => t + +l[1], 0), a = d.asks.reduce((t, l) => t + +l[1], 0);
+      const x = st.symbols[s]; x.imb = b + a > 0 ? (b - a) / (b + a) : 0; x.depthTs = Date.now();
+    }
+  }
+  async function funding() {
+    for (const s of SYMS) {
+      const p = await get(`/fapi/v1/premiumIndex?symbol=${s}`);
+      st.symbols[s].funding = +p.lastFundingRate || 0; st.symbols[s].fundingTs = Date.now();
+    }
+  }
+  function render() {
+    st.updated = Date.now();
+    document.getElementById("state").textContent = JSON.stringify(st);
+    const t = new Date(st.updated).toISOString().slice(11, 19);
+    document.getElementById("h").textContent = `actualizado ${t} UTC · ${st.errors} errores${st.lastError ? " (último: " + st.lastError + ")" : ""}`;
+    document.title = `Relé Binance · ${t}`;
+  }
+  async function guard(fn) {
+    try { await fn(); st.lastError = ""; } catch (e) { st.errors++; st.lastError = String(e && e.message || e).slice(0, 160); }
+    render();
+  }
+  const every = (ms, fn) => { const run = async () => { await guard(fn); setTimeout(run, ms); }; setTimeout(run, ms); };
+
+  (async () => {
+    await guard(async () => { await klines(); await book(); await depth(); await funding(); });
+    every(10000, book);
+    every(30000, async () => { await klines(); await depth(); });
+    every(600000, funding);
+  })();
+})();
+</script>
+</body>
+</html>
